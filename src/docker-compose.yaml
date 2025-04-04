@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  bedrock-gateway:
+    build:
+      context: . 
+      dockerfile: Dockerfile_ecs
+    image: bedrock-gateway:latest
+    container_name: bedrock-gateway-service
+    ports:
+      - "8000:80"
+    env_file:
+      - ./.env # Load environment variables from .env in the src directory
+    volumes:
+      # Mount agents.yaml from src directory
+      - ./agents.yaml:/app/agents.yaml:ro
+ 

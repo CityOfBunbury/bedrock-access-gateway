@@ -442,3 +442,146 @@ for chunk in response:
     elif chunk.choices[0].delta.content:
         content += chunk.choices[0].delta.content
 ```
+
+## Bedrock Agents API
+
+This gateway allows you to interact with your configured Amazon Bedrock Agents using OpenAI-compatible endpoints.
+
+**Prerequisites:**
+
+1.  **Agent Configuration:** Ensure you have configured your Bedrock Agents in the `src/agents.yaml` file. Each agent needs a unique `name`, its `agent_id`, and `alias_id`.
+    ```yaml
+    # Example src/agents.yaml
+    agents:
+      - name: MY-AGENT-DEV
+        agent_id: XXXXXXXXXX # Your Agent ID
+        alias_id: YYYYYYYYYY # Your Agent Alias ID
+      - name: ANOTHER-AGENT-PROD
+        agent_id: ZZZZZZZZZZ
+        alias_id: AAAAAAAAAA
+    ```
+2.  **Gateway Running:** Make sure the gateway service is running (either locally via `docker-compose` or deployed).
+3.  **API Key and Base URL:** Have your `OPENAI_API_KEY` and `OPENAI_BASE_URL` environment variables set correctly.
+
+**List Available Agents (Models)**
+
+Use this endpoint to see which agents are available through the gateway, based on your `agents.yaml` configuration.
+
+**Example Request:**
+
+```bash
+# Note the /agents path prefix
+curl -s $OPENAI_BASE_URL/agents/models -H "Authorization: Bearer $OPENAI_API_KEY" | jq .
+```
+
+**Example Response:**
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "MY-AGENT-DEV",
+      "created": 1712840000,
+      "object": "model",
+      "owned_by": "amazon-bedrock-agent"
+    },
+    {
+      "id": "ANOTHER-AGENT-PROD",
+      "created": 1712840000,
+      "object": "model",
+      "owned_by": "amazon-bedrock-agent"
+    }
+  ]
+}
+```
+
+**Agent Chat Completions**
+
+Use this endpoint to interact with a specific Bedrock Agent. The request format is similar to the standard chat completions endpoint, but you target the `/agents/chat/completions` path and use the agent's `name` (from `agents.yaml`) as the `model`.
+
+**Example Request (Non-Streaming):**
+
+```bash
+curl $OPENAI_BASE_URL/agents/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -d '{
+    "model": "MY-AGENT-DEV", # Use the agent name defined in agents.yaml
+    "messages": [
+      {
+        "role": "user",
+        "content": "What services do you offer?"
+      }
+    ],
+    "stream": false
+  }'
+```
+
+**Example Request (Streaming):**
+
+```bash
+curl $OPENAI_BASE_URL/agents/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -d '{
+    "model": "MY-AGENT-DEV",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Tell me a short story about a cloud."
+      }
+    ],
+    "stream": true
+  }'
+```
+
+**Example Response (Non-Streaming):**
+
+The response structure mirrors the OpenAI chat completion format.
+
+```json
+{
+    "id": "chatcmpl-agent-MY-AGENT-DEV-xxxxxxxx",
+    "object": "chat.completion",
+    "created": 1712840100,
+    "model": "MY-AGENT-DEV",
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "As an agent, I can help you with tasks X, Y, and Z by leveraging my configured knowledge bases and action groups..."
+            },
+            "finish_reason": "stop"
+        }
+    ],
+    "usage": {
+        "prompt_tokens": -1, 
+        "completion_tokens": -1,
+        "total_tokens": -1
+    }
+}
+```
+*Note: Token usage is currently not available from the Bedrock Agent `invoke_agent` API and is reported as -1.*
+
+**Example Response (Streaming):**
+
+You will receive a stream of Server-Sent Events (SSE) similar to standard streaming chat completions.
+
+```text
+data: {"id":"chatcmpl-agent-MY-AGENT-DEV-yyyyyyyy","object":"chat.completion.chunk","created":1712840200,"model":"MY-AGENT-DEV","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-agent-MY-AGENT-DEV-yyyyyyyy","object":"chat.completion.chunk","created":1712840200,"model":"MY-AGENT-DEV","choices":[{"index":0,"delta":{"content":"Once"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-agent-MY-AGENT-DEV-yyyyyyyy","object":"chat.completion.chunk","created":1712840200,"model":"MY-AGENT-DEV","choices":[{"index":0,"delta":{"content":" upon"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-agent-MY-AGENT-DEV-yyyyyyyy","object":"chat.completion.chunk","created":1712840200,"model":"MY-AGENT-DEV","choices":[{"index":0,"delta":{"content":" a time..."},"finish_reason":null}]}
+
+...
+
+data: {"id":"chatcmpl-agent-MY-AGENT-DEV-yyyyyyyy","object":"chat.completion.chunk","created":1712840200,"model":"MY-AGENT-DEV","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+```

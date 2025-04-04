@@ -27,6 +27,7 @@ If you find this GitHub repository useful, please consider giving it a free star
 - [x] Support Multimodal API
 - [x] Support Cross-Region Inference
 - [x] Support Reasoning (**new**)
+- [x] Support Bedrock Agents (via YAML config)
 
 Please check [Usage Guide](./docs/Usage.md) for more details about how to use the new APIs.
 
@@ -212,13 +213,42 @@ Replace the repo url in the CloudFormation template before you deploy.
 
 ### Can I run this locally
 
-Yes, you can run this locally, e.g. run below command under `src` folder:
+Yes, you can run this locally.
+
+**Option 1: Using uvicorn (manual)**
+
+Navigate to the `src` folder and run:
 
 ```bash
-uvicorn api.app:app --host 0.0.0.0 --port 8000
+# Install dependencies first (if not already done)
+# pip install -r requirements.txt
+
+# Run the application
+uvicorn api.app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-The API base url should look like `http://localhost:8000/api/v1`.
+**Option 2: Using Docker Compose (recommended)**
+
+This method uses the `src/docker-compose.yaml` file to build the container and run the service, managing dependencies and environment variables easily.
+
+1.  **Navigate to the `src` directory:** `cd src`
+2.  **Configure:**
+    *   Edit `src/.env` and provide your AWS credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, etc.).
+    *   Edit `src/agents.yaml` to define your Bedrock Agents.
+3.  **Build and run:**
+    ```bash
+    docker-compose up --build -d
+    ```
+4.  **(Optional) Stop the service:**
+    ```bash
+    docker-compose down
+    ```
+5.  **(Optional) View logs:**
+    ```bash
+    docker-compose logs -f
+    ```
+
+The API base URL for local testing (either method) will typically be `http://localhost:8000/api/v1`. You will still need to provide the API Key defined in Secrets Manager (or the default `bedrock` key if not using CloudFormation deployment locally) and valid AWS credentials in your environment or the `.env` file for the application to interact with Bedrock.
 
 ### Any performance sacrifice or latency increase by using the proxy APIs
 

@@ -56,25 +56,14 @@ async def agent_chat_completions(request: Request):
         alias_id = agent_config["alias_id"]
 
         # Extract last user message and construct context (similar to example)
-        last_user_message = ""
+        # Construct input from all messages
+        full_input = ""
         if chat_request.messages:
-            for msg in reversed(chat_request.messages):
-                if msg.role == "user":
-                    last_user_message = msg.content
-                    break
-            if not last_user_message and chat_request.messages: # Fallback to last message content
-                 last_user_message = chat_request.messages[-1].content
-        
-        if not last_user_message:
-             raise HTTPException(status_code=400, detail="No user message found in the request.")
+            # Simple concatenation - consider adding roles or structure if needed by the specific agent
+            full_input = "\\n\\n".join([f"{msg.role}: {msg.content}" for msg in chat_request.messages if msg.content]) # Join non-empty content with roles
 
-        # Basic context handling (can be enhanced)
-        # Note: Bedrock Agents might handle session history internally.
-        # Sending full history might not be necessary or optimal.
-        # Check Bedrock Agent documentation for best practices on session management.
-        # For now, sending just the last user message as input.
-        # Consider adding logic for system prompts or prepending history if needed.
-        full_input = last_user_message
+        if not full_input: # Check if after concatenation, input is still empty
+             raise HTTPException(status_code=400, detail="No message content found in the request.")
 
         # Use a consistent session ID, potentially passed in request or generated
         # Example uses a random one - consider making this more robust

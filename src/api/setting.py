@@ -21,8 +21,9 @@ DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "anthropic.claude-3-sonnet-20240
 DEFAULT_EMBEDDING_MODEL = os.environ.get("DEFAULT_EMBEDDING_MODEL", "cohere.embed-multilingual-v3")
 ENABLE_CROSS_REGION_INFERENCE = os.environ.get("ENABLE_CROSS_REGION_INFERENCE", "true").lower() != "false"
 
-# Load agent configuration from YAML file
-AGENTS_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "agents.yaml")
+# Load agent configuration from YAML file in the src directory
+# Path relative to this setting.py file
+AGENTS_CONFIG_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "agents.yaml"))
 AGENTS = {}
 DEFAULT_AGENT = None
 
