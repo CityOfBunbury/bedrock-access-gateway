@@ -34,7 +34,7 @@ async def agent_chat_completions(request: Request):
         
     try:
         body = await request.json()
-        chat_request = ChatRequest(**body) # Changed ChatCompletionRequest to ChatRequest
+        chat_request = ChatRequest(**body)
         logger.debug(f"Received agent chat request: {body}")
 
         model_id = chat_request.model or DEFAULT_AGENT
@@ -55,18 +55,16 @@ async def agent_chat_completions(request: Request):
         agent_id = agent_config["agent_id"]
         alias_id = agent_config["alias_id"]
 
-        # Extract last user message and construct context (similar to example)
         # Construct input from all messages
         full_input = ""
         if chat_request.messages:
-            # Simple concatenation - consider adding roles or structure if needed by the specific agent
+            # Simple concatenation
             full_input = "\\n\\n".join([f"{msg.role}: {msg.content}" for msg in chat_request.messages if msg.content]) # Join non-empty content with roles
 
         if not full_input: # Check if after concatenation, input is still empty
              raise HTTPException(status_code=400, detail="No message content found in the request.")
 
-        # Use a consistent session ID, potentially passed in request or generated
-        # Example uses a random one - consider making this more robust
+        # Use a random session ID - we will handle conversation history outside of bedrock
         session_id = body.get("session_id", f"session-{model_id}-{os.urandom(4).hex()}")
 
         agent_request = {
@@ -117,7 +115,7 @@ async def agent_chat_completions(request: Request):
                                 }
                                 yield f"data: {json.dumps(chunk)}\\n\\n"
                         elif 'trace' in event:
-                             # Optionally log or handle trace information
+                             # log trace information
                              logger.debug(f"Agent trace: {event['trace']}")
 
 
@@ -126,7 +124,7 @@ async def agent_chat_completions(request: Request):
                     yield "data: [DONE]\\n\\n"
                 except Exception as e:
                     logger.error(f"Error during agent stream generation: {e}")
-                    # You might want to send an error chunk to the client
+                    # Send an error chunk to the client
                     error_chunk = {'error': {'message': f'Stream generation error: {e}', 'type': 'stream_error'}}
                     yield f"data: {json.dumps(error_chunk)}\\n\\n"
                     yield "data: [DONE]\\n\\n"
@@ -142,7 +140,7 @@ async def agent_chat_completions(request: Request):
                     if 'chunk' in event:
                         completion += event['chunk']['bytes'].decode('utf-8')
                     elif 'trace' in event:
-                        logger.debug(f"Agent trace: {event['trace']}") # Log trace info if needed
+                        logger.debug(f"Agent trace: {event['trace']}") # Log trace info
             except Exception as e:
                  logger.error(f"Error processing agent response completion: {e}")
                  raise HTTPException(status_code=500, detail="Error processing agent response.")
@@ -192,7 +190,7 @@ async def list_agent_models():
             object="model",
             owned_by="amazon-bedrock-agent", # Indicate it's an agent
             permission=[], # Permissions not applicable in this context
-            created=int(time.time()), # Use current time or a fixed timestamp
+            created=int(time.time()), # Use current time
         ))
         
     if not model_cards and DEFAULT_AGENT and DEFAULT_AGENT in AGENTS: # Ensure default is listed if it exists but loop was empty

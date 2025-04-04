@@ -4,7 +4,7 @@ services:
   bedrock-gateway:
     build:
       context: . 
-      dockerfile: Dockerfile_ecs
+      dockerfile: Dockerfile_ecs #use Dockerfile_ecs for deployments to EC2 (openwebui)
     image: bedrock-gateway:latest
     container_name: bedrock-gateway-service
     ports:
