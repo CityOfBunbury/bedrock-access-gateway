@@ -7,6 +7,16 @@ from botocore.exceptions import ClientError
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from ..schema import ChatRequest, Models, Model
+from ..schema import (
+    ChatResponse,
+    ChatResponseMessage,
+    ChatStreamResponse,
+    Choice,
+    ChoiceDelta,
+    Usage,
+    ErrorMessage,
+    Error
+)
 from ..setting import AGENTS, DEFAULT_AGENT, AWS_REGION
 
 logger = logging.getLogger(__name__)
@@ -96,38 +106,54 @@ async def agent_chat_completions(request: Request):
             async def stream_generator():
                 try:
                     # Initial chunk with role
-                    yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': created_time, 'model': model_id, 'choices': [{'index': 0, 'delta': {'role': 'assistant'}, 'finish_reason': None}]})}\\n\\n"
-                    
+                    initial_chunk = ChatStreamResponse(
+                        id=response_id,
+                        object="chat.completion.chunk",
+                        created=created_time,
+                        model=model_id,
+                        choices=[ChoiceDelta(index=0, delta={"role": "assistant"}, finish_reason=None)],
+                        usage=None  # Usage is typically null in non-final chunks
+                    )
+                    yield f"data: {initial_chunk.model_dump_json()}\n\n"
+
                     for event in response['completion']:
                         if 'chunk' in event:
                             content = event['chunk']['bytes'].decode('utf-8')
                             if content:
-                                chunk = {
-                                    'id': response_id,
-                                    'object': 'chat.completion.chunk',
-                                    'created': created_time,
-                                    'model': model_id,
-                                    'choices': [{
-                                        'index': 0,
-                                        'delta': {'content': content},
-                                        'finish_reason': None
-                                    }]
-                                }
-                                yield f"data: {json.dumps(chunk)}\\n\\n"
+                                chunk_obj = ChatStreamResponse(
+                                    id=response_id,
+                                    object="chat.completion.chunk",
+                                    created=created_time,
+                                    model=model_id,
+                                    choices=[ChoiceDelta(index=0, delta={"content": content}, finish_reason=None)],
+                                    usage=None
+                                )
+                                yield f"data: {chunk_obj.model_dump_json()}\n\n"
                         elif 'trace' in event:
                              # log trace information
                              logger.debug(f"Agent trace: {event['trace']}")
 
-
                     # Final chunk with finish reason
-                    yield f"data: {json.dumps({'id': response_id, 'object': 'chat.completion.chunk', 'created': created_time, 'model': model_id, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\\n\\n"
-                    yield "data: [DONE]\\n\\n"
+                    final_chunk = ChatStreamResponse(
+                        id=response_id,
+                        object="chat.completion.chunk",
+                        created=created_time,
+                        model=model_id,
+                        choices=[ChoiceDelta(index=0, delta={}, finish_reason="stop")],
+                         # TODO: Add usage here if stream_options.include_usage is implemented
+                        usage=None
+                    )
+                    yield f"data: {final_chunk.model_dump_json()}\n\n"
+                    yield "data: [DONE]\n\n"
                 except Exception as e:
                     logger.error(f"Error during agent stream generation: {e}")
-                    # Send an error chunk to the client
-                    error_chunk = {'error': {'message': f'Stream generation error: {e}', 'type': 'stream_error'}}
-                    yield f"data: {json.dumps(error_chunk)}\\n\\n"
-                    yield "data: [DONE]\\n\\n"
+                    # Send an error chunk to the client (using the Error schema might be better if needed)
+                    error_detail = ErrorMessage(message=f'Stream generation error: {e}', type='stream_error')
+                    error_chunk = Error(error=error_detail)
+                    # Note: OpenAI stream errors aren't standard, JSON format might vary.
+                    # This sends a JSON object, adjust if a specific error format is needed.
+                    yield f"data: {error_chunk.model_dump_json()}\n\n"
+                    yield "data: [DONE]\n\n"
 
 
             return StreamingResponse(stream_generator(), media_type="text/event-stream")
@@ -145,30 +171,33 @@ async def agent_chat_completions(request: Request):
                  logger.error(f"Error processing agent response completion: {e}")
                  raise HTTPException(status_code=500, detail="Error processing agent response.")
 
-
-            openai_response = {
-                "id": response_id,
-                "object": "chat.completion",
-                "created": created_time,
-                "model": model_id,
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": completion
-                        },
-                        "finish_reason": "stop" # Bedrock Agent likely stops when done
-                    }
+            # Use Pydantic models for the response
+            openai_response = ChatResponse(
+                id=response_id,
+                object="chat.completion",
+                created=created_time,
+                model=model_id,
+                choices=[
+                    Choice(
+                        index=0,
+                        message=ChatResponseMessage(
+                            role="assistant",
+                            content=completion
+                        ),
+                        finish_reason="stop" # Bedrock Agent likely stops when done
+                    )
                 ],
-                "usage": { # Usage data not directly available from Bedrock Agent invoke_agent
-                    "prompt_tokens": -1,
-                    "completion_tokens": -1,
-                    "total_tokens": -1
-                }
-            }
+                # Usage data not directly available from Bedrock Agent invoke_agent
+                # Use the Usage model with placeholder values
+                usage=Usage(
+                    prompt_tokens=-1,
+                    completion_tokens=-1,
+                    total_tokens=-1
+                )
+            )
             logger.info(f"Sending non-streaming response from agent {model_id}")
-            return JSONResponse(content=openai_response)
+            # FastAPI automatically handles Pydantic model serialization
+            return openai_response
 
     except HTTPException as http_exc:
         # Re-raise HTTPException to let FastAPI handle it
