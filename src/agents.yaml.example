@@ -1,0 +1,8 @@
+agents:
+  - name: AGENT-NAME # This name will be used as the model ID in the API
+    agent_id: AGENT-ID # Replace with your actual Agent ID
+    alias_id: ALIAS-ID # Replace with your actual Agent Alias ID (e.g., TSTALIASID)
+# Example of another agent
+# - name: ANOTHER-AGENT-PROD
+#   agent_id: ANOTHER_AGENT_ID
+#   alias_id: ANOTHER_ALIAS_ID 
