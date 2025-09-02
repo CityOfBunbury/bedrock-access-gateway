@@ -4,6 +4,7 @@ import time
 import logging
 import boto3
 from botocore.exceptions import ClientError
+from botocore.config import Config
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from ..schema import ChatRequest, Models, Model
@@ -18,6 +19,7 @@ from ..schema import (
     Error
 )
 from ..setting import AGENTS, DEFAULT_AGENT, AWS_REGION
+from starlette.concurrency import run_in_threadpool
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -25,10 +27,16 @@ router = APIRouter()
 # Initialize Bedrock client (consider moving to a shared client module later)
 # For now, initializing here. Ensure AWS credentials are configured.
 try:
+    config = Config(
+        connect_timeout=60,
+        read_timeout=900,
+        retries={'max_attempts': 8, 'mode': 'adaptive'},
+        max_pool_connections=50,
+    )
     bedrock_agent_runtime = boto3.client(
         service_name="bedrock-agent-runtime",
         region_name=AWS_REGION,
-        # Assuming credentials are handled by environment, IAM role, or shared config
+        config=config,
     )
 except Exception as e:
     logger.error(f"Error initializing Bedrock Agent Runtime client: {e}")
@@ -69,7 +77,7 @@ async def agent_chat_completions(request: Request):
         full_input = ""
         if chat_request.messages:
             # Simple concatenation
-            full_input = "\\n\\n".join([f"{msg.role}: {msg.content}" for msg in chat_request.messages if msg.content]) # Join non-empty content with roles
+            full_input = "\n\n".join([f"{msg.role}: {msg.content}" for msg in chat_request.messages if msg.content]) # Join non-empty content with roles
 
         if not full_input: # Check if after concatenation, input is still empty
              raise HTTPException(status_code=400, detail="No message content found in the request.")
@@ -87,9 +95,9 @@ async def agent_chat_completions(request: Request):
 
         logger.info(f"Invoking Bedrock Agent: {agent_id} (Alias: {alias_id}) with session: {session_id}")
 
-        # Call Bedrock Agent
+        # Call Bedrock Agent (run blocking boto3 call in a thread pool)
         try:
-            response = bedrock_agent_runtime.invoke_agent(**agent_request)
+            response = await run_in_threadpool(bedrock_agent_runtime.invoke_agent, **agent_request)
         except ClientError as e:
             error_message = f"AWS Bedrock Agent error: {e.response['Error']['Message']}"
             logger.error(error_message)
@@ -111,27 +119,66 @@ async def agent_chat_completions(request: Request):
                         object="chat.completion.chunk",
                         created=created_time,
                         model=model_id,
-                        choices=[ChoiceDelta(index=0, delta={"role": "assistant"}, finish_reason=None)],
-                        usage=None  # Usage is typically null in non-final chunks
+                        choices=[
+                            ChoiceDelta(
+                                index=0,
+                                delta=ChatResponseMessage(role="assistant"),
+                                finish_reason=None,
+                            )
+                        ],
+                        usage=None,
                     )
                     yield f"data: {initial_chunk.model_dump_json()}\n\n"
 
-                    for event in response['completion']:
+                    # Iterate the event stream in a background thread to avoid blocking the event loop
+                    def _next_event(it):
+                        try:
+                            return next(it)
+                        except StopIteration:
+                            return None
+
+                    iterator = iter(response.get('completion', []))
+                    while True:
+                        event = await run_in_threadpool(_next_event, iterator)
+                        if event is None:
+                            break
+
                         if 'chunk' in event:
-                            content = event['chunk']['bytes'].decode('utf-8')
+                            try:
+                                content = event['chunk']['bytes'].decode('utf-8')
+                            except Exception:
+                                content = ""
                             if content:
                                 chunk_obj = ChatStreamResponse(
                                     id=response_id,
                                     object="chat.completion.chunk",
                                     created=created_time,
                                     model=model_id,
-                                    choices=[ChoiceDelta(index=0, delta={"content": content}, finish_reason=None)],
-                                    usage=None
+                                    choices=[
+                                        ChoiceDelta(
+                                            index=0,
+                                            delta=ChatResponseMessage(content=content),
+                                            finish_reason=None,
+                                        )
+                                    ],
+                                    usage=None,
                                 )
                                 yield f"data: {chunk_obj.model_dump_json()}\n\n"
                         elif 'trace' in event:
-                             # log trace information
-                             logger.debug(f"Agent trace: {event['trace']}")
+                            # log trace information
+                            logger.debug(f"Agent trace: {event['trace']}")
+
+                    # Optional usage chunk if requested
+                    if chat_request.stream_options and chat_request.stream_options.include_usage:
+                        usage_chunk = ChatStreamResponse(
+                            id=response_id,
+                            object="chat.completion.chunk",
+                            created=created_time,
+                            model=model_id,
+                            choices=[],
+                            usage=Usage(prompt_tokens=-1, completion_tokens=-1, total_tokens=-1),
+                        )
+                        yield f"data: {usage_chunk.model_dump_json()}\n\n"
 
                     # Final chunk with finish reason
                     final_chunk = ChatStreamResponse(
@@ -139,22 +186,18 @@ async def agent_chat_completions(request: Request):
                         object="chat.completion.chunk",
                         created=created_time,
                         model=model_id,
-                        choices=[ChoiceDelta(index=0, delta={}, finish_reason="stop")],
-                         # TODO: Add usage here if stream_options.include_usage is implemented
-                        usage=None
+                        choices=[
+                            ChoiceDelta(index=0, delta=ChatResponseMessage(), finish_reason="stop")
+                        ],
+                        usage=None,
                     )
                     yield f"data: {final_chunk.model_dump_json()}\n\n"
                     yield "data: [DONE]\n\n"
                 except Exception as e:
                     logger.error(f"Error during agent stream generation: {e}")
-                    # Send an error chunk to the client (using the Error schema might be better if needed)
-                    error_detail = ErrorMessage(message=f'Stream generation error: {e}', type='stream_error')
-                    error_chunk = Error(error=error_detail)
-                    # Note: OpenAI stream errors aren't standard, JSON format might vary.
-                    # This sends a JSON object, adjust if a specific error format is needed.
+                    error_chunk = Error(error=ErrorMessage(message=f"Stream generation error: {e}"))
                     yield f"data: {error_chunk.model_dump_json()}\n\n"
                     yield "data: [DONE]\n\n"
-
 
             return StreamingResponse(stream_generator(), media_type="text/event-stream")
 
