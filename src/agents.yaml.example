@@ -6,3 +6,19 @@ agents:
 # - name: ANOTHER-AGENT-PROD
 #   agent_id: ANOTHER_AGENT_ID
 #   alias_id: ANOTHER_ALIAS_ID 
+
+# Example:
+
+agents:
+# Agent 1
+  - name: agent_1
+    agent_id: 
+    alias_id: 
+# Agent 2
+  - name: agent_2
+    agent_id: 
+    alias_id: 
+# Agent 3
+  - name: agent_3
+    agent_id: 
+    alias_id: 
