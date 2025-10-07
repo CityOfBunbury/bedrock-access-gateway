@@ -158,6 +158,11 @@ def list_bedrock_models() -> dict:
             if profile_id in profile_list:
                 model_list[profile_id] = {"modalities": input_modalities}
 
+            # Add global cross-region inference profiles
+            global_profile_id = "global." + model_id
+            if global_profile_id in profile_list:
+                model_list[global_profile_id] = {"modalities": input_modalities}
+
             # Add application inference profiles (emit all profiles for this model)
             if model_id in app_profiles_by_model:
                 for profile_arn in app_profiles_by_model[model_id]:
@@ -263,6 +268,7 @@ class BedrockModel(BaseChatModel):
             response = await self._invoke_bedrock(chat_request, stream=True)
             message_id = self.generate_message_id()
             stream = response.get("stream")
+            self.think_emitted = False
             async for chunk in self._async_iterate(stream):
                 args = {"model_id": chat_request.model, "message_id": message_id, "chunk": chunk}
                 stream_response = self._create_response_stream(**args)
@@ -283,6 +289,7 @@ class BedrockModel(BaseChatModel):
 
             # return an [DONE] message at the end.
             yield self.stream_response_to_bytes()
+            self.think_emitted = False  # Cleanup
         except Exception as e:
             logger.error("Stream error for model %s: %s", chat_request.model, str(e))
             error_event = Error(error=ErrorMessage(message=str(e)))
@@ -521,6 +528,11 @@ class BedrockModel(BaseChatModel):
             "topP": chat_request.top_p,
         }
 
+        # Claude Sonnet 4.5 doesn't support both temperature and topP
+        # Remove topP for this model
+        if "claude-sonnet-4-5" in chat_request.model.lower():
+            inference_config.pop("topP", None)
+
         if chat_request.stop is not None:
             stop = chat_request.stop
             if isinstance(stop, str):
@@ -547,7 +559,7 @@ class BedrockModel(BaseChatModel):
             )
             inference_config["maxTokens"] = max_tokens
             # unset topP - Not supported
-            inference_config.pop("topP")
+            inference_config.pop("topP", None)
 
             args["additionalModelRequestFields"] = {
                 "reasoning_config": {"type": "enabled", "budget_tokens": budget_tokens}
@@ -573,8 +585,12 @@ class BedrockModel(BaseChatModel):
             args["toolConfig"] = tool_config
         # add Additional fields to enable extend thinking
         if chat_request.extra_body:
-            # reasoning_config will not be used 
+            # reasoning_config will not be used
             args["additionalModelRequestFields"] = chat_request.extra_body
+            # Extended thinking doesn't support both temperature and topP
+            # Remove topP to avoid validation error
+            if "thinking" in chat_request.extra_body:
+                inference_config.pop("topP", None)
         return args
 
     def _create_response(
@@ -620,6 +636,9 @@ class BedrockModel(BaseChatModel):
                     logger.warning(
                         "Unknown tag in message content " + ",".join(c.keys())
                     )
+            if message.reasoning_content:
+                message.content = f"<think>{message.reasoning_content}</think>{message.content}"
+                message.reasoning_content = None
 
         response = ChatResponse(
             id=message_id,
@@ -688,11 +707,19 @@ class BedrockModel(BaseChatModel):
                     content=delta["text"],
                 )
             elif "reasoningContent" in delta:
-                # ignore "signature" in the delta.
                 if "text" in delta["reasoningContent"]:
-                    message = ChatResponseMessage(
-                        reasoning_content=delta["reasoningContent"]["text"],
-                    )
+                    content = delta["reasoningContent"]["text"]
+                    if not self.think_emitted:
+                        # Port of "content_block_start" with "thinking"
+                        content = "<think>" + content
+                        self.think_emitted = True
+                    message = ChatResponseMessage(content=content)
+                elif "signature" in delta["reasoningContent"]:
+                    # Port of "signature_delta"
+                    if self.think_emitted:
+                        message = ChatResponseMessage(content="\n </think> \n\n")
+                    else:
+                        return None  # Ignore signature if no <think> started
             else:
                 # tool use
                 index = chunk["contentBlockDelta"]["contentBlockIndex"] - 1
