@@ -59,5 +59,6 @@ if DEFAULT_AGENT and DEFAULT_AGENT not in AGENTS:
 
 logger.info(f"Available agents: {list(AGENTS.keys())}")
 logger.info(f"Default agent: {DEFAULT_AGENT}")
+
 ENABLE_PROMPT_CACHING = os.environ.get("ENABLE_PROMPT_CACHING", "false").lower() != "false"
 
