@@ -4,7 +4,7 @@ services:
   bedrock-access-gateway:
     build:
       context: ./src
-      dockerfile: Dockerfile_ecs
+      dockerfile: Dockerfile
     ports:
       - "127.0.0.1:8000:8080"
     environment:
@@ -16,3 +16,4 @@ services:
       - AWS_SESSION_TOKEN
     volumes:
       - ${HOME}/.aws:/home/appuser/.aws
+      - ./src/agents.yaml:/var/task/agents.yaml:ro
