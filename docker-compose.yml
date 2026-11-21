@@ -6,7 +6,7 @@ services:
       context: ./src
       dockerfile: Dockerfile
     ports:
-      - "127.0.0.1:8000:8080"
+      - "0.0.0.0:8000:8080"
     environment:
       - ENABLE_PROMPT_CACHING=true
       - API_KEY=${OPENAI_API_KEY}
@@ -14,6 +14,7 @@ services:
       - AWS_ACCESS_KEY_ID
       - AWS_SECRET_ACCESS_KEY
       - AWS_SESSION_TOKEN
+      - AWS_REGION=${AWS_REGION}
     volumes:
       - ${HOME}/.aws:/home/appuser/.aws
       - ./src/agents.yaml:/var/task/agents.yaml:ro

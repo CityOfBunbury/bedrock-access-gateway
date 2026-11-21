@@ -10,6 +10,5 @@ services:
     env_file:
       - ./.env # Load environment variables from .env in the src directory
     volumes:
-      # Mount agents.yaml from src directory
       - ./agents.yaml:/app/agents.yaml:ro
  
