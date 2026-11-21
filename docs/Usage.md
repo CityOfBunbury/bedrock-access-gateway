@@ -170,6 +170,12 @@ print(doc_result[0][:5])
 
 ## Multimodal API
 
+> [!NOTE]
+> When you pass a remote `image_url`, the gateway fetches it server-side. Only `http(s)` URLs that resolve
+> to a publicly routable address are fetched; URLs pointing at the instance metadata service, `localhost`,
+> or private ranges are rejected with a `400`. You can restrict this further with `IMAGE_URL_ALLOWED_HOSTS`
+> or turn it off with `ENABLE_IMAGE_URL_FETCH=false` — see the [Security Guide](./Security.md#2-image-url-fetching-ssrf).
+
 **Example Request**
 
 ```bash
@@ -367,6 +373,8 @@ You can try it with different questions, such as:
 - For Claude 3.7 Sonnet, the reasoning mode (or thinking mode) is not enabled by default, you must pass additional `reasoning_effort` parameter in your request. Please also provide the right max_tokens (or max_completion_tokens) in your request. The budget_tokens is based on reasoning_effort (low: 30%, medium: 60%, high: 100% of max tokens), ensuring minimum budget_tokens of 1,024 with Anthropic recommending at least 4,000 tokens for comprehensive reasoning. Check [Bedrock Document](https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-anthropic-claude-37.html) for more details.
 - For DeepSeek R1, you don't need additional reasoning_effort parameter, otherwise, you may get an error.
 - The reasoning response (CoT, thoughts) is added in an additional tag 'reasoning_content' which is not officially supported by OpenAI. This is to follow [Deepseek Reasoning Model](https://api-docs.deepseek.com/guides/reasoning_model#api-example). This may be changed in the future.
+
+> **Note**: Omitting `max_tokens` (or `max_completion_tokens`) now allows Bedrock to use the model's native maximum output (e.g., 64K for Claude Sonnet 4) rather than the previous 2048 implicit cap. Please set `max_tokens` explicitly if you need to control costs or latency.
 
 **Example Request**
 
