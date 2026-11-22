@@ -17,4 +17,3 @@ services:
       - AWS_REGION=${AWS_REGION}
     volumes:
       - ${HOME}/.aws:/home/appuser/.aws
-      - ./src/agents.yaml:/var/task/agents.yaml:ro

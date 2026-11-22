@@ -9,6 +9,4 @@ services:
       - "8001:80"
     env_file:
       - ./.env # Load environment variables from .env in the src directory
-    volumes:
-      - ./agents.yaml:/app/agents.yaml:ro
  

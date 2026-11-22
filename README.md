@@ -35,7 +35,6 @@ If you find this GitHub repository useful, please consider giving it a free star
 - [x] Support Cross-Region Inference
 - [x] Support Application Inference Profiles (**new**)
 - [x] Support Reasoning (**new**)
-- [x] Support Bedrock Agents (via YAML config)
 - [x] Support Interleaved thinking (**new**)
 - [x] Support Prompt Caching (**new**)
 
@@ -386,7 +385,6 @@ This method uses the `src/docker-compose.yaml` file to build the container and r
 1.  **Navigate to the `src` directory:** `cd src`
 2.  **Configure:**
     *   Edit `src/.env` and provide your AWS credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, etc.).
-    *   Edit `src/agents.yaml` to define your Bedrock Agents.
 3.  **Build and run:**
     ```bash
     docker-compose up --build -d
