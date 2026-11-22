@@ -1,6 +1,7 @@
 import base64
 import json
 import logging
+import re
 import time
 from abc import ABC
 from typing import AsyncIterable, Iterable, Literal
@@ -90,21 +91,39 @@ ENCODER = tiktoken.get_encoding("cl100k_base")
 # This enables feature detection for all profile types without pattern matching
 profile_metadata = {}
 
-# Models that don't support both temperature and topP simultaneously
-# When both are provided, temperature takes precedence and topP is removed
-TEMPERATURE_TOPP_CONFLICT_MODELS = {
-    "claude-sonnet-4-5",
-    "claude-sonnet-4-6",
-    "claude-haiku-4-5",
-    "claude-opus-4-5",
-}
+# Claude versions, as (major, minor), from which a special case applies. See claude_model_version().
 
-# Models that don't support assistant message prefill
-# For these models, if conversation ends with assistant message (e.g., "continue response"),
+# From Claude 4.5, temperature and topP can't be sent together.
+# When both are provided, temperature takes precedence and topP is removed
+TEMPERATURE_TOPP_CONFLICT_FROM = (4, 5)
+
+# From Claude 4.6, assistant message prefill is rejected.
+# If conversation ends with assistant message (e.g., "continue response"),
 # a user message will be added to ask the model to continue
-NO_ASSISTANT_PREFILL_MODELS = {
-    "claude-opus-4-6",
-}
+NO_ASSISTANT_PREFILL_FROM = (4, 6)
+
+# From Claude 4.7, temperature and topP are rejected (some models accept only the default values),
+# and thinking with budget_tokens is rejected, so neither is sent.
+NO_SAMPLING_PARAMS_FROM = (4, 7)
+NO_BUDGET_TOKENS_FROM = (4, 7)
+
+_CLAUDE_MODEL_ID = re.compile(r"claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?=$|[-:@./])")
+
+
+def claude_model_version(model_id: str) -> tuple[str, tuple[int, int]] | None:
+    """Return the Claude family and (major, minor) version of a model id, or None.
+
+    Works with any inference profile prefix and version or date suffix, e.g.
+    "global.anthropic.claude-sonnet-5-5" -> ("sonnet", (5, 5)) and
+    "anthropic.claude-sonnet-4-20250514-v1:0" -> ("sonnet", (4, 0)).
+    Older ids that put the version first (claude-3-5-sonnet) and non-Claude
+    models return None, so no version based special case applies to them.
+    """
+    match = _CLAUDE_MODEL_ID.search(model_id.lower())
+    if not match:
+        return None
+    family, major, minor = match.groups()
+    return family, (int(major), int(minor or 0))
 
 
 def list_bedrock_models() -> dict:
@@ -788,14 +807,13 @@ class BedrockModel(BaseChatModel):
         # Bedrock Converse API requires conversations to end with a user message.
         # Some models don't support "assistant message prefill".
         # If the conversation ends with an assistant message (e.g., "continue response" scenario),
-        # add a user message asking to continue - but only for models in NO_ASSISTANT_PREFILL_MODELS.
+        # add a user message asking to continue - but only for Claude models from NO_ASSISTANT_PREFILL_FROM.
         if chat_request and reformatted_messages and reformatted_messages[-1]["role"] == "assistant":
             # Resolve profile to underlying model for feature detection
             resolved_model = self._resolve_to_foundation_model(chat_request.model)
-            model_lower = resolved_model.lower()
+            claude = claude_model_version(resolved_model)
 
-            # Check if model is in the no-prefill list
-            if any(no_prefill_model in model_lower for no_prefill_model in NO_ASSISTANT_PREFILL_MODELS):
+            if claude and claude[1] >= NO_ASSISTANT_PREFILL_FROM:
                 reformatted_messages.append({
                     "role": "user",
                     "content": [{"text": "Please continue your response from where you left off."}]
@@ -855,18 +873,25 @@ class BedrockModel(BaseChatModel):
         if chat_request.top_p is not None:
             inference_config["topP"] = chat_request.top_p
 
-        # Some models (Claude Sonnet 4.5, Claude Sonnet 4.6, Haiku 4.5) don't support both temperature and topP
+        # Claude models from 4.5 don't support both temperature and topP
         # When both are provided, keep temperature and remove topP
         # Resolve profile to underlying model for feature detection
         resolved_model = self._resolve_to_foundation_model(chat_request.model)
-        model_lower = resolved_model.lower()
+        claude = claude_model_version(resolved_model)
+        claude_release = claude[1] if claude else None
 
-        # Check if model is in the conflict list and both parameters are present
+        # Check if model is in the conflict range and both parameters are present
         if "temperature" in inference_config and "topP" in inference_config:
-            if any(conflict_model in model_lower for conflict_model in TEMPERATURE_TOPP_CONFLICT_MODELS):
+            if claude_release and claude_release >= TEMPERATURE_TOPP_CONFLICT_FROM:
                 inference_config.pop("topP", None)
                 if DEBUG:
                     logger.info(f"Removed topP for {chat_request.model} (conflicts with temperature)")
+
+        # Newer Claude models reject temperature and topP, so neither is sent
+        if claude_release and claude_release >= NO_SAMPLING_PARAMS_FROM:
+            for key in ("temperature", "topP"):
+                if inference_config.pop(key, None) is not None and DEBUG:
+                    logger.info(f"Removed {key} for {chat_request.model} (not supported)")
 
         if chat_request.stop is not None:
             stop = chat_request.stop
@@ -887,7 +912,11 @@ class BedrockModel(BaseChatModel):
             resolved_model = self._resolve_to_foundation_model(chat_request.model)
             model_lower = resolved_model.lower()
 
-            if "anthropic.claude" in model_lower:
+            if claude_release and claude_release >= NO_BUDGET_TOKENS_FROM:
+                # Newer Claude models reject budget_tokens (their thinking is adaptive),
+                # so sending a reasoning_config would only return a 400
+                logger.debug(f"reasoning_effort ignored for {chat_request.model} (budget_tokens not supported)")
+            elif "anthropic.claude" in model_lower:
                 # Claude format: reasoning_config = object with budget_tokens
                 if effective_max_tokens is None:
                     raise HTTPException(
