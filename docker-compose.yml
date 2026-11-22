@@ -4,11 +4,14 @@ services:
   bedrock-access-gateway:
     build:
       context: ./src
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile_ecs
+    image: bedrock-access-gateway:latest
     ports:
       - "0.0.0.0:8000:8080"
     environment:
       - ENABLE_PROMPT_CACHING=true
+      # Images arrive inline as base64, so the gateway never needs to fetch image URLs.
+      - ENABLE_IMAGE_URL_FETCH=false
       - API_KEY=${OPENAI_API_KEY}
       - AWS_PROFILE
       - AWS_ACCESS_KEY_ID
