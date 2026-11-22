@@ -19,5 +19,7 @@ services:
       - AWS_SECRET_ACCESS_KEY
       - AWS_SESSION_TOKEN
       - AWS_REGION=${AWS_REGION}
+      # Optional: summarized (default) or omitted. See docs/Deployment.md.
+      - CLAUDE_THINKING_DISPLAY
     volumes:
       - ${HOME}/.aws:/home/appuser/.aws
