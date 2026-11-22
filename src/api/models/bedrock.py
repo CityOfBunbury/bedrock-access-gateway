@@ -408,9 +408,23 @@ class BedrockModel(BaseChatModel):
         return chat_response
 
     async def _async_iterate(self, stream):
-        """Helper method to convert sync iterator to async iterator"""
-        for chunk in stream:
-            await run_in_threadpool(lambda: chunk)
+        """Helper method to convert sync iterator to async iterator.
+
+        Each read blocks until Bedrock sends the next event, so it runs in the
+        thread pool to keep the event loop free for other requests.
+        """
+
+        def _next_chunk(it):
+            try:
+                return next(it)
+            except StopIteration:
+                return None
+
+        iterator = iter(stream)
+        while True:
+            chunk = await run_in_threadpool(_next_chunk, iterator)
+            if chunk is None:
+                break
             yield chunk
 
     async def chat_stream(self, chat_request: ChatRequest) -> AsyncIterable[bytes]:
