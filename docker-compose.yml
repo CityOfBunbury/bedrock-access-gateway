@@ -6,6 +6,7 @@ services:
       context: ./src
       dockerfile: Dockerfile_ecs
     image: bedrock-access-gateway:latest
+    restart: unless-stopped
     ports:
       - "0.0.0.0:8000:8080"
     environment:
