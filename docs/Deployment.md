@@ -17,9 +17,36 @@ Compose reads these values from the shell or from a `.env` file next to `docker-
 | `OPENAI_API_KEY` | The API key clients must send as a bearer token. Passed to the app as `API_KEY`. |
 | `AWS_REGION` | The Region the gateway calls Bedrock in. |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE` | Optional. Only needed when the host has no instance role. See [Switch to an instance role](#switch-from-access-keys-to-an-instance-role). |
+| `CLAUDE_THINKING_DISPLAY` | Optional. `summarized` (default) or `omitted`. See [Reasoning effort](#reasoning-effort). |
 
 The compose file also sets `ENABLE_PROMPT_CACHING=true` and `ENABLE_IMAGE_URL_FETCH=false`
 (images must be sent inline as base64 data URLs). Other settings are listed in `src/api/setting.py`.
+
+### Reasoning effort
+
+A chat request can set the OpenAI field `reasoning_effort` (Open WebUI sends it when a model
+has a reasoning effort set). The gateway accepts `low`, `medium`, `high`, `xhigh` and `max`,
+and turns it into Bedrock fields according to the model:
+
+| Model | What the gateway sends |
+|-------|------------------------|
+| Claude 4.7 and later (for example Sonnet 5.5, Opus 5.5) | Adaptive thinking: `thinking` = `{"type": "adaptive", "display": <CLAUDE_THINKING_DISPLAY>}` and `output_config` = `{"effort": <reasoning_effort>}`. `max_tokens` is not required. |
+| Claude 4.6 and earlier | A fixed thinking budget: `reasoning_config` with `budget_tokens` of 30% (`low`), 60% (`medium`) or all but one (`high`) of `max_tokens`, which must be set. `xhigh` and `max` are sent as `high`. |
+| DeepSeek v3 | `reasoning_config` = `low`, `medium` or `high`. `xhigh` and `max` are sent as `high`. |
+| Other models | Nothing. |
+
+Any other value is ignored, with a warning in the log, and the request goes ahead without it.
+A request without `reasoning_effort` sends none of these fields. Fields given in `extra_body`
+(for example `thinking` or `output_config`) replace the ones the gateway sets.
+
+`CLAUDE_THINKING_DISPLAY` sets whether Claude 4.7 and later return their thinking when
+`reasoning_effort` is set: `summarized` returns a summary of it, wrapped in `<think>` tags at
+the start of the response, and `omitted` returns none. An unrecognised value falls back to
+`summarized`, with a warning in the log at start. Claude 5 and later models think adaptively
+even without `reasoning_effort`, but do not return the thinking.
+
+Thinking is billed as output tokens and counts against `max_tokens`, so a higher effort can
+use more of the response's `max_tokens` and cost more.
 
 Restrict the published port to the clients that need it, for example with a security group
 that only allows port 8000 from the client host.

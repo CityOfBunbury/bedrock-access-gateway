@@ -1,3 +1,4 @@
+import logging
 import os
 
 API_ROUTE_PREFIX = os.environ.get("API_ROUTE_PREFIX", "/api/v1")
@@ -15,6 +16,25 @@ DEFAULT_EMBEDDING_MODEL = os.environ.get("DEFAULT_EMBEDDING_MODEL", "cohere.embe
 ENABLE_CROSS_REGION_INFERENCE = os.environ.get("ENABLE_CROSS_REGION_INFERENCE", "true").lower() != "false"
 ENABLE_APPLICATION_INFERENCE_PROFILES = os.environ.get("ENABLE_APPLICATION_INFERENCE_PROFILES", "true").lower() != "false"
 ENABLE_PROMPT_CACHING = os.environ.get("ENABLE_PROMPT_CACHING", "false").lower() != "false"
+
+# Whether Claude models with adaptive thinking return a summary of their thinking when a request
+# sets reasoning_effort: "summarized" (returned, wrapped in <think> tags) or "omitted" (not returned).
+CLAUDE_THINKING_DISPLAY_VALUES = ("summarized", "omitted")
+
+
+def _claude_thinking_display(value: str) -> str:
+    display = value.strip().lower()
+    if display not in CLAUDE_THINKING_DISPLAY_VALUES:
+        logging.getLogger(__name__).warning(
+            "CLAUDE_THINKING_DISPLAY=%r is not one of %s, using summarized",
+            value,
+            ", ".join(CLAUDE_THINKING_DISPLAY_VALUES),
+        )
+        return "summarized"
+    return display
+
+
+CLAUDE_THINKING_DISPLAY = _claude_thinking_display(os.environ.get("CLAUDE_THINKING_DISPLAY", "summarized"))
 
 # Multimodal image inputs may reference a remote URL that the gateway fetches on
 # behalf of the caller. See api/image_url.py for the checks applied to that URL.

@@ -108,7 +108,8 @@ class ChatRequest(BaseModel):
     user: str | None = None  # Not used
     max_tokens: int | None = Field(default=None, ge=1)
     max_completion_tokens: int | None = Field(default=None, ge=1)
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
+    # Other values are accepted and ignored with a warning, so a setting a model does not know never fails a request
+    reasoning_effort: Literal["low", "medium", "high", "xhigh", "max"] | str | None = None
     n: int | None = 1  # Not used
     tools: list[Tool] | None = None
     tool_choice: str | object = "auto"

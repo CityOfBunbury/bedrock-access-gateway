@@ -44,6 +44,7 @@ from api.schema import (
 )
 from api.setting import (
     AWS_REGION,
+    CLAUDE_THINKING_DISPLAY,
     DEBUG,
     DEFAULT_MODEL,
     ENABLE_CROSS_REGION_INFERENCE,
@@ -104,8 +105,13 @@ NO_ASSISTANT_PREFILL_FROM = (4, 6)
 
 # From Claude 4.7, temperature and topP are rejected (some models accept only the default values),
 # and thinking with budget_tokens is rejected, so neither is sent.
+# reasoning_effort is sent as adaptive thinking with output_config.effort instead.
 NO_SAMPLING_PARAMS_FROM = (4, 7)
 NO_BUDGET_TOKENS_FROM = (4, 7)
+
+# reasoning_effort values the gateway accepts. Claude models with adaptive thinking take all of them;
+# other models only know low, medium and high, so xhigh and max are treated as high for them.
+REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 _CLAUDE_MODEL_ID = re.compile(r"claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?=$|[-:@./])")
 
@@ -905,17 +911,29 @@ class BedrockModel(BaseChatModel):
             "system": system_prompts,
             "inferenceConfig": inference_config,
         }
-        if chat_request.reasoning_effort:
+        reasoning_effort = chat_request.reasoning_effort
+        if reasoning_effort and reasoning_effort not in REASONING_EFFORTS:
+            logger.warning(
+                f"reasoning_effort {reasoning_effort[:32]!r} ignored for {chat_request.model} "
+                f"(expected one of {', '.join(REASONING_EFFORTS)})"
+            )
+            reasoning_effort = None
+        if reasoning_effort:
             # reasoning_effort is supported by Claude and DeepSeek v3
             # Different models use different formats
             # Resolve profile to underlying model for feature detection
             resolved_model = self._resolve_to_foundation_model(chat_request.model)
             model_lower = resolved_model.lower()
+            # Older models only know low, medium and high
+            legacy_effort = "high" if reasoning_effort in ("xhigh", "max") else reasoning_effort
 
             if claude_release and claude_release >= NO_BUDGET_TOKENS_FROM:
-                # Newer Claude models reject budget_tokens (their thinking is adaptive),
-                # so sending a reasoning_config would only return a 400
-                logger.debug(f"reasoning_effort ignored for {chat_request.model} (budget_tokens not supported)")
+                # Newer Claude models reject budget_tokens (their thinking is adaptive):
+                # the effort goes in output_config, and display sets whether the thinking is returned
+                args["additionalModelRequestFields"] = {
+                    "thinking": {"type": "adaptive", "display": CLAUDE_THINKING_DISPLAY},
+                    "output_config": {"effort": reasoning_effort},
+                }
             elif "anthropic.claude" in model_lower:
                 # Claude format: reasoning_config = object with budget_tokens
                 if effective_max_tokens is None:
@@ -927,7 +945,7 @@ class BedrockModel(BaseChatModel):
                 inference_config.pop("topP", None)
 
                 budget_tokens = self._calc_budget_tokens(
-                    effective_max_tokens, chat_request.reasoning_effort
+                    effective_max_tokens, legacy_effort
                 )
                 args["additionalModelRequestFields"] = {
                     "reasoning_config": {"type": "enabled", "budget_tokens": budget_tokens}
@@ -936,10 +954,10 @@ class BedrockModel(BaseChatModel):
                 # DeepSeek v3 format: reasoning_config = string ('low', 'medium', 'high')
                 # From Bedrock Playground: {"reasoning_config": "high"}
                 args["additionalModelRequestFields"] = {
-                    "reasoning_config": chat_request.reasoning_effort  # Direct string: low/medium/high
+                    "reasoning_config": legacy_effort  # Direct string: low/medium/high
                 }
                 if DEBUG:
-                    logger.info(f"Applied reasoning_config={chat_request.reasoning_effort} for DeepSeek v3")
+                    logger.info(f"Applied reasoning_config={legacy_effort} for DeepSeek v3")
             else:
                 # For other models (Qwen, etc.), ignore reasoning_effort parameter
                 if DEBUG:
