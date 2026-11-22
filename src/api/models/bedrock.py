@@ -602,7 +602,21 @@ class BedrockModel(BaseChatModel):
                 elif message.tool_calls:
                     # Tool use message
                     for tool_call in message.tool_calls:
-                        tool_input = json.loads(tool_call.function.arguments)
+                        try:
+                            tool_input = json.loads(tool_call.function.arguments)
+                        except json.JSONDecodeError:
+                            tool_input = None
+                        if not isinstance(tool_input, dict):
+                            # Empty or cut-off arguments (e.g. the call hit the token limit).
+                            # Converse requires toolUse input to be an object and the paired
+                            # toolResult only refers to the call by id, so an empty object keeps
+                            # the pair valid instead of failing every later turn of the chat.
+                            logger.warning(
+                                "Tool call %s (%s) has arguments that are not a JSON object, sending {} instead",
+                                tool_call.id,
+                                tool_call.function.name,
+                            )
+                            tool_input = {}
                         messages.append(
                             {
                                 "role": message.role,

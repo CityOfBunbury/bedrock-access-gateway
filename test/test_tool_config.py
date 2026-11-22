@@ -193,6 +193,56 @@ def test_tool_use_is_unchanged_when_tools_are_enabled(tool_choice, expected):
     ]
 
 
+def cut_off_history(arguments: str) -> list[dict]:
+    return [
+        {"role": "user", "content": "Write the report."},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "call_1", "type": "function", "function": {"name": "write_file", "arguments": arguments}},
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "Tool call was cut off"},
+        {"role": "user", "content": "Try again."},
+    ]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param("", id="empty"),
+        pytest.param('{"path": "a.txt", "con', id="truncated"),
+        pytest.param('["a.txt"]', id="not-an-object"),
+    ],
+)
+def test_tools_enabled_with_unusable_tool_call_arguments_sends_empty_input(arguments):
+    args = parse(cut_off_history(arguments), tools=[WEATHER_TOOL])
+
+    assert "toolConfig" in args
+    assert args["messages"] == [
+        {"role": "user", "content": [{"text": "Write the report."}]},
+        {
+            "role": "assistant",
+            "content": [{"toolUse": {"toolUseId": "call_1", "name": "write_file", "input": {}}}],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"toolResult": {"toolUseId": "call_1", "content": [{"text": "Tool call was cut off"}]}},
+                {"text": "Try again."},
+            ],
+        },
+    ]
+    assert_roles_alternate(args)
+
+
+def test_tools_enabled_with_valid_tool_call_arguments_is_unchanged():
+    args = parse(cut_off_history('{"path": "a.txt", "content": "Done"}'), tools=[WEATHER_TOOL])
+
+    tool_use = args["messages"][1]["content"][0]["toolUse"]
+    assert tool_use["input"] == {"path": "a.txt", "content": "Done"}
+
+
 def test_default_tool_choice_keeps_tools_enabled():
     args = parse(TOOL_HISTORY, tools=[WEATHER_TOOL])
 
