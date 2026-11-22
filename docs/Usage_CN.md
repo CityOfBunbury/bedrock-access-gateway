@@ -167,6 +167,11 @@ print(doc_result[0][:5])
 
 ## Multimodal API
 
+> [!NOTE]
+> 当你传入远程 `image_url` 时，由网关在服务端发起请求获取图片。只有解析到公网可路由地址的 `http(s)` URL 才会被获取；
+> 指向实例元数据服务、`localhost` 或内网地址段的 URL 会返回 `400`。你可以用 `IMAGE_URL_ALLOWED_HOSTS` 进一步限制，
+> 或用 `ENABLE_IMAGE_URL_FETCH=false` 完全关闭该功能，详见[安全指南](./Security.md#2-image-url-fetching-ssrf)。
+
 **Request 示例**
 
 ```bash
@@ -364,6 +369,8 @@ You can try it with different questions, such as:
 - Claude 3.7 Sonnet 推理模式（或思考模式）默认未启用，您必须在请求中传递额外的 reasoning_effort 参数，参数值可选:low，medium, high。另外，请在请求中提供正确的 max_tokens（或 max_completion_tokens）参数。budget_tokens 基于 reasoning_effort 设置（低：30%，中：60%，高：100% 的max tokens），确保最小 budget_tokens 为 1,024，Anthropic 建议至少使用 4,000 个令牌以获得全面的推理。详情请参阅 [Bedrock Document](https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-anthropic-claude-37.html)。
 - Deepseek R1 会自动使用推理模式，不需要在中传递额外的 reasoning_effort 参数（否则会报错）
 - 推理结果（思维链结果、思考过程）被添加到名为 'reasoning_content' 的额外标签中，这不是 OpenAI 官方支持的格式。此设计遵循 [Deepseek Reasoning Model](https://api-docs.deepseek.com/guides/reasoning_model#api-example)  的规范。未来可能会有所变动。
+
+> **注意**: 现在如果省略 `max_tokens` （或 `max_completion_tokens`），Bedrock 将使用模型的原生最大输出限制（例如，Claude Sonnet 4 为 64K），而不是之前的 2048 隐式上限。如果您需要控制成本或延迟，请明确设置 `max_tokens`。
 
 **Request 示例**
 

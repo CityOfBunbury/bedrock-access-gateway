@@ -8,12 +8,12 @@ from typing import AsyncIterable, Iterable, Literal
 
 import boto3
 import numpy as np
-import requests
 import tiktoken
 from botocore.config import Config
 from fastapi import HTTPException
 from starlette.concurrency import run_in_threadpool
 
+from api.image_url import parse_image_url
 from api.models.base import BaseChatModel, BaseEmbeddingsModel
 from api.schema import (
     AssistantMessage,
@@ -81,6 +81,7 @@ SUPPORTED_BEDROCK_EMBEDDING_MODELS = {
     "amazon.titan-embed-text-v2:0": "Titan Embeddings G2 - Text",
     # Disable Titan embedding.
     # "amazon.titan-embed-image-v1": "Titan Multimodal Embeddings G1"
+    "amazon.nova-2-multimodal-embeddings-v1:0": "Nova Multimodal Embeddings V2",
 }
 
 ENCODER = tiktoken.get_encoding("cl100k_base")
@@ -90,13 +91,39 @@ ENCODER = tiktoken.get_encoding("cl100k_base")
 # This enables feature detection for all profile types without pattern matching
 profile_metadata = {}
 
-# Models that don't support both temperature and topP simultaneously
+# Claude versions, as (major, minor), from which a special case applies. See claude_model_version().
+
+# From Claude 4.5, temperature and topP can't be sent together.
 # When both are provided, temperature takes precedence and topP is removed
-TEMPERATURE_TOPP_CONFLICT_MODELS = {
-    "claude-sonnet-4-5",
-    "claude-haiku-4-5",
-    "claude-opus-4-5",
-}
+TEMPERATURE_TOPP_CONFLICT_FROM = (4, 5)
+
+# From Claude 4.6, assistant message prefill is rejected.
+# If conversation ends with assistant message (e.g., "continue response"),
+# a user message will be added to ask the model to continue
+NO_ASSISTANT_PREFILL_FROM = (4, 6)
+
+# From Claude 4.7, temperature and topP are rejected (some models accept only the default values),
+# and thinking with budget_tokens is rejected, so neither is sent.
+NO_SAMPLING_PARAMS_FROM = (4, 7)
+NO_BUDGET_TOKENS_FROM = (4, 7)
+
+_CLAUDE_MODEL_ID = re.compile(r"claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?=$|[-:@./])")
+
+
+def claude_model_version(model_id: str) -> tuple[str, tuple[int, int]] | None:
+    """Return the Claude family and (major, minor) version of a model id, or None.
+
+    Works with any inference profile prefix and version or date suffix, e.g.
+    "global.anthropic.claude-sonnet-5-5" -> ("sonnet", (5, 5)) and
+    "anthropic.claude-sonnet-4-20250514-v1:0" -> ("sonnet", (4, 0)).
+    Older ids that put the version first (claude-3-5-sonnet) and non-Claude
+    models return None, so no version based special case applies to them.
+    """
+    match = _CLAUDE_MODEL_ID.search(model_id.lower())
+    if not match:
+        return None
+    family, major, minor = match.groups()
+    return family, (int(major), int(minor or 0))
 
 
 def list_bedrock_models() -> dict:
@@ -400,9 +427,23 @@ class BedrockModel(BaseChatModel):
         return chat_response
 
     async def _async_iterate(self, stream):
-        """Helper method to convert sync iterator to async iterator"""
-        for chunk in stream:
-            await run_in_threadpool(lambda: chunk)
+        """Helper method to convert sync iterator to async iterator.
+
+        Each read blocks until Bedrock sends the next event, so it runs in the
+        thread pool to keep the event loop free for other requests.
+        """
+
+        def _next_chunk(it):
+            try:
+                return next(it)
+            except StopIteration:
+                return None
+
+        iterator = iter(stream)
+        while True:
+            chunk = await run_in_threadpool(_next_chunk, iterator)
+            if chunk is None:
+                break
             yield chunk
 
     async def chat_stream(self, chat_request: ChatRequest) -> AsyncIterable[bytes]:
@@ -412,11 +453,26 @@ class BedrockModel(BaseChatModel):
             message_id = self.generate_message_id()
             stream = response.get("stream")
             self.think_emitted = False
+            reasoning_tokens = 0
             async for chunk in self._async_iterate(stream):
+                # Accumulate reasoning tokens from delta chunks before processing
+                if "contentBlockDelta" in chunk:
+                    delta = chunk["contentBlockDelta"].get("delta", {})
+                    if "reasoningContent" in delta and "text" in delta["reasoningContent"]:
+                        reasoning_tokens += len(ENCODER.encode(delta["reasoningContent"]["text"]))
+
                 args = {"model_id": chat_request.model, "message_id": message_id, "chunk": chunk}
                 stream_response = self._create_response_stream(**args)
                 if not stream_response:
                     continue
+
+                # Patch reasoning tokens into the final usage chunk
+                if stream_response.usage and reasoning_tokens > 0:
+                    stream_response.usage.completion_tokens_details = CompletionTokensDetails(
+                        reasoning_tokens=reasoning_tokens,
+                        audio_tokens=0,
+                    )
+
                 if DEBUG:
                     logger.info("Proxy response :" + stream_response.model_dump_json())
                 if stream_response.choices:
@@ -516,6 +572,10 @@ class BedrockModel(BaseChatModel):
         https://docs.aws.amazon.com/bedrock/latest/userguide/conversation-inference.html#message-inference-examples
         """
         messages = []
+        # Bedrock rejects toolUse/toolResult blocks when no toolConfig is sent,
+        # so tool history is kept as plain text when tools are disabled.
+        tools_disabled = self._tools_disabled(chat_request)
+        tool_names = {}  # tool call id -> tool name, to label tool results
         for message in chat_request.messages:
             if isinstance(message, UserMessage):
                 messages.append(
@@ -546,10 +606,36 @@ class BedrockModel(BaseChatModel):
                             ),
                         }
                     )
-                if message.tool_calls:
+                if message.tool_calls and tools_disabled:
+                    # Tool use as text. Arguments are passed through as received,
+                    # they may be incomplete JSON if the tool call was cut off.
+                    for tool_call in message.tool_calls:
+                        tool_names[tool_call.id] = tool_call.function.name
+                        tool_text = f"[Tool call: {tool_call.function.name}({tool_call.function.arguments})]"
+                        messages.append(
+                            {
+                                "role": message.role,
+                                "content": [{"text": tool_text}],
+                            }
+                        )
+                elif message.tool_calls:
                     # Tool use message
                     for tool_call in message.tool_calls:
-                        tool_input = json.loads(tool_call.function.arguments)
+                        try:
+                            tool_input = json.loads(tool_call.function.arguments)
+                        except json.JSONDecodeError:
+                            tool_input = None
+                        if not isinstance(tool_input, dict):
+                            # Empty or cut-off arguments (e.g. the call hit the token limit).
+                            # Converse requires toolUse input to be an object and the paired
+                            # toolResult only refers to the call by id, so an empty object keeps
+                            # the pair valid instead of failing every later turn of the chat.
+                            logger.warning(
+                                "Tool call %s (%s) has arguments that are not a JSON object, sending {} instead",
+                                tool_call.id,
+                                tool_call.function.name,
+                            )
+                            tool_input = {}
                         messages.append(
                             {
                                 "role": message.role,
@@ -572,6 +658,17 @@ class BedrockModel(BaseChatModel):
                 # Handle different content formats from OpenAI SDK
                 tool_content = self._extract_tool_content(message.content)
 
+                if tools_disabled:
+                    # Tool result as text in a user message
+                    tool_label = tool_names.get(message.tool_call_id) or message.tool_call_id
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [{"text": f"[Tool result for {tool_label}]: {tool_content}"}],
+                        }
+                    )
+                    continue
+
                 messages.append(
                     {
                         "role": "user",
@@ -590,6 +687,16 @@ class BedrockModel(BaseChatModel):
                 # ignore others, such as system messages
                 continue
         return self._reframe_multi_payloard(messages, chat_request)
+
+    @staticmethod
+    def _tools_disabled(chat_request: ChatRequest) -> bool:
+        """Tools are disabled when none are offered or tool_choice is "none".
+
+        Converse has no "none" tool choice, and it rejects toolUse/toolResult
+        blocks unless toolConfig is set. So in this case no toolConfig is sent
+        and any tool history is converted to plain text (see _parse_messages).
+        """
+        return not chat_request.tools or chat_request.tool_choice == "none"
 
     def _extract_tool_content(self, content) -> str:
         """Extract text content from various OpenAI SDK tool message formats.
@@ -697,6 +804,23 @@ class BedrockModel(BaseChatModel):
                 {"role": current_role, "content": current_content}
             )
 
+        # Bedrock Converse API requires conversations to end with a user message.
+        # Some models don't support "assistant message prefill".
+        # If the conversation ends with an assistant message (e.g., "continue response" scenario),
+        # add a user message asking to continue - but only for Claude models from NO_ASSISTANT_PREFILL_FROM.
+        if chat_request and reformatted_messages and reformatted_messages[-1]["role"] == "assistant":
+            # Resolve profile to underlying model for feature detection
+            resolved_model = self._resolve_to_foundation_model(chat_request.model)
+            claude = claude_model_version(resolved_model)
+
+            if claude and claude[1] >= NO_ASSISTANT_PREFILL_FROM:
+                reformatted_messages.append({
+                    "role": "user",
+                    "content": [{"text": "Please continue your response from where you left off."}]
+                })
+                if DEBUG:
+                    logger.info(f"Added continuation prompt for {chat_request.model} - conversation ended with assistant message")
+
         # Add cachePoint to messages if enabled and supported
         if chat_request and reformatted_messages:
             if not self._supports_prompt_caching(chat_request.model):
@@ -732,10 +856,16 @@ class BedrockModel(BaseChatModel):
         messages = self._parse_messages(chat_request)
         system_prompts = self._parse_system_prompts(chat_request)
 
+        effective_max_tokens = (
+            chat_request.max_completion_tokens
+            if chat_request.max_completion_tokens is not None
+            else chat_request.max_tokens
+        )
+
         # Base inference parameters.
-        inference_config = {
-            "maxTokens": chat_request.max_tokens,
-        }
+        inference_config = {}
+        if effective_max_tokens is not None:
+            inference_config["maxTokens"] = effective_max_tokens
 
         # Only include optional parameters when specified
         if chat_request.temperature is not None:
@@ -743,18 +873,25 @@ class BedrockModel(BaseChatModel):
         if chat_request.top_p is not None:
             inference_config["topP"] = chat_request.top_p
 
-        # Some models (Claude Sonnet 4.5, Haiku 4.5) don't support both temperature and topP
+        # Claude models from 4.5 don't support both temperature and topP
         # When both are provided, keep temperature and remove topP
         # Resolve profile to underlying model for feature detection
         resolved_model = self._resolve_to_foundation_model(chat_request.model)
-        model_lower = resolved_model.lower()
+        claude = claude_model_version(resolved_model)
+        claude_release = claude[1] if claude else None
 
-        # Check if model is in the conflict list and both parameters are present
+        # Check if model is in the conflict range and both parameters are present
         if "temperature" in inference_config and "topP" in inference_config:
-            if any(conflict_model in model_lower for conflict_model in TEMPERATURE_TOPP_CONFLICT_MODELS):
+            if claude_release and claude_release >= TEMPERATURE_TOPP_CONFLICT_FROM:
                 inference_config.pop("topP", None)
                 if DEBUG:
                     logger.info(f"Removed topP for {chat_request.model} (conflicts with temperature)")
+
+        # Newer Claude models reject temperature and topP, so neither is sent
+        if claude_release and claude_release >= NO_SAMPLING_PARAMS_FROM:
+            for key in ("temperature", "topP"):
+                if inference_config.pop(key, None) is not None and DEBUG:
+                    logger.info(f"Removed {key} for {chat_request.model} (not supported)")
 
         if chat_request.stop is not None:
             stop = chat_request.stop
@@ -775,20 +912,23 @@ class BedrockModel(BaseChatModel):
             resolved_model = self._resolve_to_foundation_model(chat_request.model)
             model_lower = resolved_model.lower()
 
-            if "anthropic.claude" in model_lower:
+            if claude_release and claude_release >= NO_BUDGET_TOKENS_FROM:
+                # Newer Claude models reject budget_tokens (their thinking is adaptive),
+                # so sending a reasoning_config would only return a 400
+                logger.debug(f"reasoning_effort ignored for {chat_request.model} (budget_tokens not supported)")
+            elif "anthropic.claude" in model_lower:
                 # Claude format: reasoning_config = object with budget_tokens
-                max_tokens = (
-                    chat_request.max_completion_tokens
-                    if chat_request.max_completion_tokens
-                    else chat_request.max_tokens
-                )
-                budget_tokens = self._calc_budget_tokens(
-                    max_tokens, chat_request.reasoning_effort
-                )
-                inference_config["maxTokens"] = max_tokens
+                if effective_max_tokens is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="max_tokens or max_completion_tokens must be set when using reasoning_effort with Claude models",
+                    )
                 # unset topP - Not supported
                 inference_config.pop("topP", None)
 
+                budget_tokens = self._calc_budget_tokens(
+                    effective_max_tokens, chat_request.reasoning_effort
+                )
                 args["additionalModelRequestFields"] = {
                     "reasoning_config": {"type": "enabled", "budget_tokens": budget_tokens}
                 }
@@ -805,7 +945,7 @@ class BedrockModel(BaseChatModel):
                 if DEBUG:
                     logger.info(f"reasoning_effort parameter ignored for model {chat_request.model} (not supported)")
         # add tool config
-        if chat_request.tools:
+        if not self._tools_disabled(chat_request):
             tool_config = {"tools": [self._convert_tool_spec(t.function) for t in chat_request.tools]}
 
             if chat_request.tool_choice and not chat_request.model.startswith(
@@ -833,8 +973,10 @@ class BedrockModel(BaseChatModel):
             }
 
             if additional_fields:
-                # Only set additionalModelRequestFields if there are actual fields to pass
-                args["additionalModelRequestFields"] = additional_fields
+                # Merge with existing additionalModelRequestFields (e.g., from reasoning_effort)
+                existing = args.get("additionalModelRequestFields", {})
+                existing.update(additional_fields)
+                args["additionalModelRequestFields"] = existing
 
                 # Extended thinking doesn't support both temperature and topP
                 # Remove topP to avoid validation error
@@ -1109,31 +1251,15 @@ class BedrockModel(BaseChatModel):
     def _parse_image(self, image_url: str) -> tuple[bytes, str]:
         """Try to get the raw data from an image url.
 
+        Accepts an inline base64 data url, or a remote http(s) url which the
+        gateway validates before fetching so that a caller cannot reach internal
+        endpoints through the proxy. Only supports 'image/jpeg', 'image/png',
+        'image/gif' or 'image/webp'.
+
         Ref: https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ImageSource.html
         returns a tuple of (Image Data, Content Type)
         """
-        pattern = r"^data:(image/[a-z]*);base64,\s*"
-        content_type = re.search(pattern, image_url)
-        # if already base64 encoded.
-        # Only supports 'image/jpeg', 'image/png', 'image/gif' or 'image/webp'
-        if content_type:
-            image_data = re.sub(pattern, "", image_url)
-            return base64.b64decode(image_data), content_type.group(1)
-
-        # Send a request to the image URL
-        response = requests.get(image_url, timeout=30)
-        # Check if the request was successful
-        if response.status_code == 200:
-            content_type = response.headers.get("Content-Type")
-            if not content_type.startswith("image"):
-                content_type = "image/jpeg"
-            # Get the image content
-            image_content = response.content
-            return image_content, content_type
-        else:
-            raise HTTPException(
-                status_code=500, detail="Unable to access the image url"
-            )
+        return parse_image_url(image_url)
 
     def _parse_content_parts(
         self,
@@ -1373,6 +1499,90 @@ class TitanEmbeddingsModel(BedrockEmbeddingsModel):
         )
 
 
+class NovaEmbeddingsModel(BedrockEmbeddingsModel):
+    # Per https://docs.aws.amazon.com/nova/latest/userguide/embeddings-schema.html
+    VALID_DIMENSIONS = {256, 384, 1024, 3072}
+    DEFAULT_DIMENSION = 3072
+
+    def _parse_args(self, text: str, dimensions: int | None = None) -> dict:
+        dim = dimensions if dimensions is not None else self.DEFAULT_DIMENSION
+        return {
+            "taskType": "SINGLE_EMBEDDING",
+            "singleEmbeddingParams": {
+                # Nova supports 9 embeddingPurpose values; GENERIC_INDEX is the
+                # general-purpose default suitable for most retrieval use cases.
+                "embeddingPurpose": "GENERIC_INDEX",
+                "embeddingDimension": dim,
+                "text": {
+                    "truncationMode": "END",
+                    "value": text,
+                },
+            },
+        }
+
+    def embed(self, embeddings_request: EmbeddingsRequest) -> EmbeddingsResponse:
+        if isinstance(embeddings_request.input, str):
+            texts = [embeddings_request.input]
+        elif isinstance(embeddings_request.input, list):
+            if len(embeddings_request.input) == 0:
+                raise HTTPException(status_code=400, detail="Input list cannot be empty")
+            # Decode token arrays if needed
+            texts = []
+            for item in embeddings_request.input:
+                if isinstance(item, str):
+                    texts.append(item)
+                elif isinstance(item, int):
+                    texts.append(ENCODER.decode([item]))
+                elif isinstance(item, list):
+                    texts.append(ENCODER.decode(item))
+                else:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Unsupported input item type: {type(item).__name__}. Expected str, int, or list of ints.",
+                    )
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported input type")
+
+        dimensions = embeddings_request.dimensions
+        # Validate dimensions once before the loop — it's constant across all texts
+        dim = dimensions if dimensions is not None else self.DEFAULT_DIMENSION
+        if dim not in self.VALID_DIMENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid dimensions {dim}. Must be one of {sorted(self.VALID_DIMENSIONS)}",
+            )
+
+        all_embeddings = []
+        total_tokens = 0
+
+        for idx, text in enumerate(texts):
+            response = self._invoke_model(
+                args=self._parse_args(text, dimensions),
+                model_id=embeddings_request.model,
+            )
+            response_body = json.loads(response.get("body").read())
+            if DEBUG:
+                logger.info("Bedrock response body keys: " + str(list(response_body.keys())))
+
+            # Response: {"embeddings": [{"embeddingType": "TEXT", "embedding": [...]}]}
+            embeddings_list = response_body.get("embeddings", [])
+            if not embeddings_list:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"No embeddings returned from Nova model for input[{idx}]",
+                )
+            all_embeddings.append(embeddings_list[0]["embedding"])
+            # Nova doesn't return token counts in the response; approximate with cl100k_base
+            total_tokens += len(ENCODER.encode(text))
+
+        return self._create_response(
+            embeddings=all_embeddings,
+            model=embeddings_request.model,
+            input_tokens=total_tokens,
+            encoding_format=embeddings_request.encoding_format,
+        )
+
+
 def get_embeddings_model(model_id: str) -> BedrockEmbeddingsModel:
     model_name = SUPPORTED_BEDROCK_EMBEDDING_MODELS.get(model_id, "")
     if DEBUG:
@@ -1380,8 +1590,10 @@ def get_embeddings_model(model_id: str) -> BedrockEmbeddingsModel:
     match model_name:
         case "Cohere Embed Multilingual" | "Cohere Embed English":
             return CohereEmbeddingsModel()
-        case "Titan Embeddings G2 - Text":
+        case "Titan Embeddings G1 - Text" | "Titan Embeddings G2 - Text":
             return TitanEmbeddingsModel()
+        case "Nova Multimodal Embeddings V2":
+            return NovaEmbeddingsModel()
         case _:
             logger.error("Unsupported model id " + model_id)
             raise HTTPException(
